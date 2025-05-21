@@ -1,5 +1,11 @@
 const HISTOGRAM_NUM_BINS = 30
 const HISTOGRAM_BAR_GAP = 2
+const appState = {
+    selectedCountryIso2: null,
+    selectedCountryName: null,
+    updateDashboard: () => {},
+    mapTransformation: d3.zoomIdentity
+}
 
 Promise.all([
     d3.csv('data/ds_salaries.csv'),
@@ -18,46 +24,61 @@ Promise.all([
  *   [1] {Object} countryData - TopoJSON object representing countries of the world
  *   [2] {Object[]} isoCodeMapData - Mapping from country ISO Alpha-2 codes to internal country IDs (fields: `country_code_alpha2`, `country_id`)
  */
-function displayDashboard([salaryData, countryData, isoCodeMapData]) {    
-    const salaryHistogramData = salaryData.map(({ salary_in_usd }) => +salary_in_usd)
+function displayDashboard([salaryData, countryData, isoCodeMapData]) { 
+    appState.updateDashboard = () => {
+        d3.select("#map-svg").selectAll("*").remove();
+        d3.select("#histogram-svg").selectAll("*").remove();
+        d3.select("#parallel-svg").selectAll("*").remove();
+        
+        const filteredSalaryData = salaryData.filter(({company_location}) => 
+            appState.selectedCountryIso2 ? company_location === appState.selectedCountryIso2: true
+        )   
 
-    const binSalaries = (salary) => {
-        if (salary < 50000) return '< 50k'
-        if (salary >= 50000 && salary < 100000) return '50k-100k'
-        if (salary >= 100000 && salary < 150000) return '100k-150k'
-        if (salary >= 150000 && salary < 200000) return '150k-200k'
-        return '200k+'
+        const salaryHistogramData = filteredSalaryData.map(({ salary_in_usd }) => +salary_in_usd)
+
+        const binSalaries = (salary) => {
+            if (salary < 50000) return '< 50k'
+            if (salary >= 50000 && salary < 100000) return '50k-100k'
+            if (salary >= 100000 && salary < 150000) return '100k-150k'
+            if (salary >= 150000 && salary < 200000) return '150k-200k'
+            return '200k+'
+        }
+
+        const experienceLevelMap = {
+            SE: 'Senior',
+            MI: 'Mid Level',
+            EN: 'Entry Level',
+            EX: 'Executive'
+        }
+
+        const binWorkTypes = (remoteRatio) => {
+            if (remoteRatio <= 33) return 'in-office'
+            if (remoteRatio > 33 && remoteRatio <= 66) return 'hybrid'
+            return 'remote'
+        }
+
+        const parallelData = filteredSalaryData.map(({ salary_in_usd, experience_level, remote_ratio }) => ({
+            salaryBin: binSalaries(+salary_in_usd),
+            experienceLevel: experienceLevelMap[experience_level],
+            workType: binWorkTypes(+remote_ratio)
+        }))
+
+        const isoCodeToIdMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_id}) => [country_code_alpha2, country_id]))
+        const idToIsoCodeMap = Object.fromEntries(isoCodeMapData.map(({country_id, country_code_alpha2}) => [country_id, country_code_alpha2]))
+        const isoCodeToNameMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_name}) => [country_code_alpha2, country_name]))
+
+        const mapData = salaryData.map(({ salary_in_usd, company_location }) => ({
+            salary_in_usd: +salary_in_usd,
+            country: isoCodeToIdMap[company_location],
+            iso2: company_location
+        }))
+
+        displayHistogram(salaryHistogramData)
+        displaySankey(parallelData)
+        displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoCodeToNameMap })
     }
 
-    const experienceLevelMap = {
-        SE: 'Senior',
-        MI: 'Mid Level',
-        EN: 'Entry Level',
-        EX: 'Executive'
-    }
-
-    const binWorkTypes = (remoteRatio) => {
-        if (remoteRatio <= 33) return 'in-office'
-        if (remoteRatio > 33 && remoteRatio <= 66) return 'hybrid'
-        return 'remote'
-    }
-
-    const parallelData = salaryData.map(({ salary_in_usd, experience_level, remote_ratio }) => ({
-        salaryBin: binSalaries(+salary_in_usd),
-        experienceLevel: experienceLevelMap[experience_level],
-        workType: binWorkTypes(+remote_ratio)
-    }))
-
-    const isoCodeMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_id}) => [country_code_alpha2, country_id]))
-
-    const mapData = salaryData.map(({ salary_in_usd, company_location }) => ({
-        salary_in_usd: +salary_in_usd,
-        country: isoCodeMap[company_location]
-    }))
-
-    displayHistogram(salaryHistogramData)
-    displaySankey(parallelData)
-    displayMap({ mapData, countryData })
+    appState.updateDashboard()
 }
 
 /**
@@ -113,7 +134,11 @@ function displayHistogram(data) {
         .attr('y', margin.top / 2)
         .attr('text-anchor', 'middle')
         .style('font-size', '16px')
-        .text('Distribution of Salaries (USD)');
+        .text(() => {
+            const base = "Distribution of Salaries (USD)"
+            const additional = ` - ${appState.selectedCountryName}` ?? ""
+            return base + additional
+        });
 
     // add in x axis
     g.append('g')
@@ -212,7 +237,11 @@ function displaySankey(data) {
         .attr("y", margin.top / 2)
         .attr("text-anchor", "middle")
         .style("font-size", "16px")
-        .text("Sankey Diagram: Salary → Experience → Work Type");
+        .text(() => {
+            const base = "Salary → Experience → Work Type"
+            const additional = ` - ${appState.selectedCountryName}` ?? ""
+            return base + additional
+        });
 
     // get color scale
     const color = d3.scaleOrdinal(d3.schemeCategory10);
@@ -259,14 +288,14 @@ function displaySankey(data) {
  * @param {Array} params.mapData - Array of salary data objects containing country codes and salaries.
  * @param {Object} params.countryData - TopoJSON object containing country shapes.
  */
-function displayMap({ mapData, countryData }) {
+function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoCodeToNameMap }) {
     // get map svg container and its width and height
     const svg = d3.select('#map-svg');
     const { width, height } = svg.node().getBoundingClientRect();
     svg.attr("viewBox", `0 0 ${width} ${height}`);
 
     // create margins
-    const margin = { top: 120, right: 0, bottom: 120, left: 0 };
+    const margin = { top: 100, right: 0, bottom: 120, left: 0 };
     const contentWidth = width - margin.left - margin.right;
     const contentHeight = height - margin.top - margin.bottom;
 
@@ -336,7 +365,27 @@ function displayMap({ mapData, countryData }) {
         .attr("d", path)
         .attr("fill", d => color(countrySalaries.get(d.id)) ?? "#ddd")
         .attr("stroke", "black")
-        .attr("stroke-width", 0.5);
+        .attr("stroke-width", 0.5)
+        .style("opacity", d => !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3)
+        .on("click", (_, d) => {
+            if (!color(countrySalaries.get(d.id))) {
+                appState.selectedCountryIso2 = null;
+                appState.selectedCountryName = null;
+                return
+            }
+
+            const selectedCountryIso2 = isoCodeToIdMap[appState.selectedCountryIso2]
+            if (selectedCountryIso2 === d.id) {
+                appState.selectedCountryIso2 = null;
+                appState.selectedCountryName = null;
+            } else {
+                const isoCode = idToIsoCodeMap[d.id];
+                appState.selectedCountryIso2 = isoCode;
+                appState.selectedCountryName = isoCodeToNameMap[isoCode];
+            }
+
+            appState.updateDashboard();
+         });
 
     const addCountryLabels = (zoomLevel) => {
         const labels = mapGroup.selectAll("text").data(countries.features, d => d.id);
@@ -344,9 +393,10 @@ function displayMap({ mapData, countryData }) {
         labels
         .attr("font-size", `${10 / zoomLevel}px`)
         .style("opacity", d => {
-                const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
-                return screenArea > 1000 ? 1 : 0;
-            });
+            const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
+            const displayOpacity = !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
+            return screenArea > 1500 ? displayOpacity : 0;
+        });
 
         labels.enter()
             .append("text")
@@ -360,12 +410,13 @@ function displayMap({ mapData, countryData }) {
             })
             .text(d => d.properties.name)
             .attr("fill", "black")
-            .attr("font-size", `${10 / zoomLevel}px`)
+            .attr("font-size", `${12 / zoomLevel}px`)
             .attr("text-anchor", "middle")
             .attr("pointer-events", "none")
             .style("opacity", d => {
                 const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
-                return screenArea > 1500 ? 1 : 0;
+                const displayOpacity = !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
+                return screenArea > 1500 ? displayOpacity : 0;
             });
 
         labels.exit().remove();
@@ -378,7 +429,11 @@ function displayMap({ mapData, countryData }) {
         .attr("y", margin.top)
         .attr("text-anchor", "middle")
         .style("font-size", "1.5rem")
-        .text("Median Salary by Country (USD)");
+        .text(() => {
+            const base = "Median Salary by Country (USD)"
+            const additional = ` - ${appState.selectedCountryName}` ?? ""
+            return base + additional
+        });
 
     // create the legend
     const legendHeight = 20;
@@ -434,9 +489,11 @@ function displayMap({ mapData, countryData }) {
     .on("zoom", (event) => {
         mapGroup.attr("transform", event.transform);
         addCountryLabels(event.transform.k)
+        appState.mapTransformation = event.transform
     });
 
     // add zoom
     svg.call(zoom);
+    svg.call(zoom.transform, appState.mapTransformation);
 }
 
