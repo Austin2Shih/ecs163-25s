@@ -326,20 +326,6 @@ function displayMap({ mapData, countryData }) {
 
     // create zoom group
     const mapGroup = containerGroup.append("g")
-    
-    // create zoom behavior generator
-    const zoom = d3.zoom()
-    .scaleExtent([1, 8])
-    .translateExtent([
-        [0, 0],
-        [width, height]
-    ])
-    .on("zoom", (event) => {
-        mapGroup.attr("transform", event.transform);
-    });
-
-    // add zoom
-    svg.call(zoom);
         
     // draw countries on the map
     mapGroup
@@ -352,28 +338,39 @@ function displayMap({ mapData, countryData }) {
         .attr("stroke", "black")
         .attr("stroke-width", 0.5);
 
-    mapGroup.selectAll("text")
-        .data(countries.features)
-        .enter()
-        .append("text")
-        .filter(d => {
-            // Compute area of the largest polygon (in projected screen space)
-            const screenArea = path.area(d.largestPolygon);
-            return screenArea > 1000; // You can tweak this threshold
-        })
-        .text(d => d.properties.name)
-        .attr("x", d => {
-            const centroid = path.centroid(d.largestPolygon);
-            return isNaN(centroid[0]) ? 0 : centroid[0];
-        })
-        .attr("y", d => {
-            const centroid = path.centroid(d.largestPolygon);
-            return isNaN(centroid[1]) ? 0 : centroid[1];
-        })
-        .attr("fill", "black")
-        .attr("font-size", "10px")
-        .attr("text-anchor", "middle")
-        .attr("pointer-events", "none");
+    const addCountryLabels = (zoomLevel) => {
+        const labels = mapGroup.selectAll("text").data(countries.features, d => d.id);
+
+        labels
+        .attr("font-size", `${10 / zoomLevel}px`)
+        .style("opacity", d => {
+                const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
+                return screenArea > 1000 ? 1 : 0;
+            });
+
+        labels.enter()
+            .append("text")
+            .attr("x", d => {
+                const centroid = path.centroid(d.largestPolygon);
+                return isNaN(centroid[0]) ? 0 : centroid[0];
+            })
+            .attr("y", d => {
+                const centroid = path.centroid(d.largestPolygon);
+                return isNaN(centroid[1]) ? 0 : centroid[1];
+            })
+            .text(d => d.properties.name)
+            .attr("fill", "black")
+            .attr("font-size", `${10 / zoomLevel}px`)
+            .attr("text-anchor", "middle")
+            .attr("pointer-events", "none")
+            .style("opacity", d => {
+                const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
+                return screenArea > 1500 ? 1 : 0;
+            });
+
+        labels.exit().remove();
+    }
+    addCountryLabels(1)
 
     // title for the map
     svg.append("text")
@@ -426,5 +423,20 @@ function displayMap({ mapData, countryData }) {
     svg.append("g")
         .attr("transform", `translate(${width - legendWidth - 20}, ${height - margin.bottom / 2 + legendHeight})`)
         .call(d3.axisBottom(legendScale).ticks(6).tickFormat(d3.format("$.2s")));
+
+    // create zoom behavior generator
+    const zoom = d3.zoom()
+    .scaleExtent([1, 14])
+    .translateExtent([
+        [0, 0],
+        [width, height]
+    ])
+    .on("zoom", (event) => {
+        mapGroup.attr("transform", event.transform);
+        addCountryLabels(event.transform.k)
+    });
+
+    // add zoom
+    svg.call(zoom);
 }
 
