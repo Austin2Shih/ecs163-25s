@@ -70,12 +70,13 @@ function displayDashboard([salaryData, countryData, isoCodeMapData]) {
         }))
 
         // creating quick lookup maps to go between country representations
-        const isoCodeToIdMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_id}) => [country_code_alpha2, country_id]))
-        const idToIsoCodeMap = Object.fromEntries(isoCodeMapData.map(({country_id, country_code_alpha2}) => [country_id, country_code_alpha2]))
+        const isoCodeToIdMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_id}) => [country_code_alpha2, +country_id]))
+        const idToIsoCodeMap = Object.fromEntries(isoCodeMapData.map(({country_id, country_code_alpha2}) => [+country_id, country_code_alpha2]))
         const isoCodeToNameMap = Object.fromEntries(isoCodeMapData.map(({country_code_alpha2, country_name}) => [country_code_alpha2, country_name]))
 
-        const mapData = salaryData.map(({ salary_in_usd, company_location }) => ({
+        const mapData = salaryData.map(({ salary_in_usd, company_location, employee_residence }) => ({
             salary_in_usd: +salary_in_usd,
+            employee_country: isoCodeToIdMap[employee_residence],
             country: isoCodeToIdMap[company_location],
             iso2: company_location
         }))
@@ -301,13 +302,15 @@ function displaySankey(data) {
  * @param {Map<string, string>} params.isoCodeToNameMap - Map from ISO 2-letter country codes to full country names.
  */
 function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoCodeToNameMap }) {
+    const selectedId = isoCodeToIdMap[appState.selectedCountryIso2]
+
     // get map svg container and its width and height
     const svg = d3.select('#map-svg');
     const { width, height } = svg.node().getBoundingClientRect();
     svg.attr("viewBox", `0 0 ${width} ${height}`);
 
     // create margins
-    const margin = { top: 100, right: 0, bottom: 120, left: 0 };
+    const margin = { top: 120, right: 0, bottom: 120, left: 0 };
     const contentWidth = width - margin.left - margin.right;
     const contentHeight = height - margin.top - margin.bottom;
 
@@ -349,7 +352,30 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
             type: 'Polygon',
             coordinates: largestPoly
         };
+
+        d.centroid = path.centroid(d.largestPolygon)
     });
+
+    const countryMap = Object.fromEntries(countries.features.map((country) => [+country.id, country]))
+    
+    // store a graph where each country is a node and edges are made where people work remote for another country
+    mapData.forEach((dataPoint) => {
+        const company_country = dataPoint.country
+        const employee_country = dataPoint.employee_country
+        if (!countryMap[company_country]) {
+            return
+        }
+
+        if (!countryMap[company_country].employee_countries) {
+            countryMap[company_country].employee_countries = {}
+        }
+
+        if (!countryMap[company_country].employee_countries[employee_country]) {
+            countryMap[company_country].employee_countries[employee_country] = 0
+        }
+
+        countryMap[company_country].employee_countries[employee_country]++
+    })
 
     // compute median salary per country
     const countrySalaries = d3.rollup(
@@ -376,14 +402,14 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
         .enter()
         .append("path")
         .attr("d", path)
-        .attr("fill", d => color(countrySalaries.get(d.id)) ?? "#ddd")
+        .attr("fill", d => color(countrySalaries.get(+d.id)) ?? "#ddd")
         .attr("stroke", "black")
         .attr("stroke-width", 0.5)
-        .style("opacity", d => !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3)
+        .style("opacity", d => !appState.selectedCountryIso2 || +d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3)
         .on("click", (_, d) => {
             // when a country is clicked, check if there is data for the country
             // if there is no data, just set it back to global data
-            if (!color(countrySalaries.get(d.id))) {
+            if (!color(countrySalaries.get(+d.id))) {
                 appState.selectedCountryIso2 = null;
                 appState.selectedCountryName = "Global";
                 appState.updateDashboard();
@@ -392,48 +418,24 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
 
             // if re-selecting the same country, deselect it.
             const selectedCountryIso2 = isoCodeToIdMap[appState.selectedCountryIso2]
-            if (selectedCountryIso2 === d.id) {
+            if (selectedCountryIso2 === +d.id) {
                 appState.selectedCountryIso2 = null;
                 appState.selectedCountryName = "Global";
             } else {
-                const isoCode = idToIsoCodeMap[d.id];
+                const isoCode = idToIsoCodeMap[+d.id];
                 appState.selectedCountryIso2 = isoCode;
                 appState.selectedCountryName = isoCodeToNameMap[isoCode];
+                
             }
 
             // trigger re-render. Redraw everything because of filter change
             appState.updateDashboard();
          });
 
-    // draw all country labels at the centroid of the largest polygon associated with the country
-    // if not part of the selected country, then set the opacity lower to highlight the selected one
-    // also, only show the text if the country drawn is big enough on the screen to prevent clutter
-    mapGroup.selectAll("text").data(countries.features, d => d.id)   
-        .enter()
-        .append("text")
-        .attr("x", d => {
-            const centroid = path.centroid(d.largestPolygon);
-            return isNaN(centroid[0]) ? 0 : centroid[0];
-        })
-        .attr("y", d => {
-            const centroid = path.centroid(d.largestPolygon);
-            return isNaN(centroid[1]) ? 0 : centroid[1];
-        })
-        .text(d => d.properties.name)
-        .attr("fill", "black")
-        .attr("font-size", `12px`)
-        .attr("text-anchor", "middle")
-        .attr("pointer-events", "none")
-        .style("opacity", d => {
-            const screenArea = path.area(d.largestPolygon);
-            const displayOpacity = !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
-            return screenArea > 1500 ? displayOpacity : 0;
-        });
-
     // title for the map
     svg.append("text")
         .attr("x", width / 2)
-        .attr("y", margin.top)
+        .attr("y", margin.top / 2)
         .attr("text-anchor", "middle")
         .style("font-size", "1.5rem")
         .text(() => {
@@ -445,11 +447,17 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
     // instructions for using the viz
     svg.append("text")
         .attr("x", width / 2)
-        .attr("y", margin.top + 24)
+        .attr("y", margin.top / 2 + 24)
         .attr("text-anchor", "middle")
         .style("font-size", "1rem")
         .text("Zoom and pan enabled on the map. Clicking a colored country will select it. Click the country again to deselect.");
-
+    
+    svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", margin.top / 2 + 24 * 2)
+        .attr("text-anchor", "middle")
+        .style("font-size", "1rem")
+        .text("Clicking a country will show where its remote employees are located.");
 
     // create the legend
     const legendHeight = 20;
@@ -495,6 +503,68 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
         .attr("transform", `translate(${width - legendWidth - 20}, ${height - margin.bottom / 2 + legendHeight})`)
         .call(d3.axisBottom(legendScale).ticks(6).tickFormat(d3.format("$.2s")));
 
+    // util for generating arc path
+    const generateArcPath = ([x1, y1], [x2, y2]) => {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const dr = Math.sqrt(dx * dx + dy * dy) * 1.5; // control arc height
+        return `M${x1},${y1} A${dr},${dr} 0 0,1 ${x2},${y2}`;
+    }
+
+    const countryConnections = Object.entries(countryMap[+selectedId]?.employee_countries || [])
+        .map(([countryId, count]) => ({ countryId: +countryId, count }))
+        .filter(({countryId}) => countryMap[countryId])
+
+    // draw the arcs using dasharray and dashoffset to create a draw animation from country of origin to dest
+    mapGroup.selectAll(".arrow")
+        .data(countryConnections)
+        .enter()
+        .append("path")
+        .attr("class", "arrow")
+        .attr("d", d => {
+            const from = countryMap[d.countryId].centroid;
+            const to = countryMap[selectedId].centroid;
+            return (from && to) ? generateArcPath(from, to) : null;
+        })
+        .attr("stroke", "steelblue")
+        .attr("stroke-width", d => `${Math.min(5, 0.75 * d.count)}`)
+        .attr("fill", "none")
+        .attr("stroke-dasharray", function () {
+            return this.getTotalLength();
+        })
+        .attr("stroke-dashoffset", function () {
+            return this.getTotalLength();
+        })
+        .style("opacity", 0.8)
+        .transition()
+        .duration(1000)
+        .attr("stroke-dashoffset", 0);
+
+    // draw all country labels at the centroid of the largest polygon associated with the country
+    // if not part of the selected country, then set the opacity lower to highlight the selected one
+    // also, only show the text if the country drawn is big enough on the screen to prevent clutter
+    // Note: drawing this text at the end so the arcs don't go over the country label
+    mapGroup.selectAll("text")
+        .data(countries.features, d => +d.id)   
+        .enter()
+        .append("text")
+        .attr("x", d => {
+            return isNaN(d.centroid[0]) ? 0 : d.centroid[0];
+        })
+        .attr("y", d => {
+            return isNaN(d.centroid[1]) ? 0 : d.centroid[1];
+        })
+        .text(d => d.properties.name)
+        .attr("fill", "black")
+        .attr("font-size", `12px`)
+        .attr("text-anchor", "middle")
+        .attr("pointer-events", "none")
+        .style("opacity", d => {
+            const screenArea = path.area(d.largestPolygon);
+            const displayOpacity = !appState.selectedCountryIso2 || +d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
+            return screenArea > 1500 ? displayOpacity : 0;
+        });
+
     // create zoom behavior generator
     const zoom = d3.zoom()
     .scaleExtent([1, 14])
@@ -512,7 +582,7 @@ function displayMap({ mapData, countryData, isoCodeToIdMap, idToIsoCodeMap, isoC
             .attr("font-size", `${10 / zoomLevel}px`)
             .style("opacity", d => {
                 const screenArea = path.area(d.largestPolygon) * zoomLevel * zoomLevel;
-                const displayOpacity = !appState.selectedCountryIso2 || d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
+                const displayOpacity = !appState.selectedCountryIso2 || +d.id === isoCodeToIdMap[appState.selectedCountryIso2] ? 1 : 0.3
                 return screenArea > 1500 ? displayOpacity : 0;
             });
     });
